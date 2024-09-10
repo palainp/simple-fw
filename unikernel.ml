@@ -141,7 +141,7 @@ module Main
     (* we need to establish listeners for the private and public interfaces *)
     (* we're interested in all traffic to the physical interface; we'd like to
        send ARP traffic to the normal ARP listener and responder,
-       handle ipv4 traffic with the functions we've defined above for NATting,
+       handle ipv4 traffic with the functions we've defined above for filtering,
        and ignore all ipv6 traffic (ipv6 has no need for NAT!). *)
     let listen_public =
       let header_size = Ethernet.Packet.sizeof_ethernet
