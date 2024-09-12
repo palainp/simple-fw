@@ -68,63 +68,87 @@ let default_drop _cb (dest, _packet) =
 (* The update packet is (as a UDP packet):
    2B port source + 2B port dest + 2B len + 2B crc
    + 4B magic string "1234"
-   + 4B IP source + 1B netmask
-   + 4B IP dest + 1B netmask
    + 1B insert or append (INSERT=0, APPEND=1)
-   + 1B the protocol code (ICMP=1, TCP=6, UDP=17, ANY=other values)
-   + 1B the decision (0=DROP, 1=ACCEPT)
-   + 1B '\n'
+   + 1B number of the following
+     + 4B IP source (all 0s is joker)
+     + 4B IP dest (all 0s is joker)
+     + 1B source netmask (0 is joker) + 1B destination netmask (0 is joker)
+     + 1B the protocol code (ICMP=1, TCP=6, UDP=17, ANY=other values)
+     + 1B the decision (0=DROP, 1=ACCEPT, anything else is a failure)
 
    One can send such a packet with:
-   python -c "print(\"\\x31\\x32\\x33\\x34\\x0a\\x0b\\x00\\x00\\x18\\x0a\\x0b\\x00\\x00\\x18\\x01\\x06\\x01\")" | nc -u 10.0.0.2 1234
-   This would append the rule: 10.11.0.0/24 -> 10.11.0.0/24 ( TCP ) : ACCEPT
+     python -c "import sys; sys.stdout.buffer.write(bytearray([49, 50, 51, 52, 0, 2, 10, 11, 12, 13, 192, 168, 0, 0, 24, 24, 6, 0, 172, 16, 0, 0, 0, 0, 0, 0, 0, 0, 255, 1]))" | nc -u 10.0.0.2 1234
+   This would append the rules:
+     10.11.12.13/24 -> 192.168.0.0/24 ( TCP ) : DROP
+     172.16.0.0/12 -> 0.0.0.0/0 ( ANY ) : ACCEPT
 *)
 let magic_hdr = Int32.of_string "0x31323334"
 
 let magic_is_present payload =
-  Cstruct.length payload = 26 &&
   Cstruct.BE.get_uint16 payload 2 = 1234 && (* our port must be 1234 *)
-  Cstruct.BE.get_uint32 payload 8 = magic_hdr &&
-  Cstruct.get_uint8 payload 25 = 10 (* final '\n' *)
+  Cstruct.BE.get_uint32 payload 8 = magic_hdr
   (* I currently don't bother to check the crc... *)
 
 let update t payload =
-  let src = Ipaddr.V4.of_int32 (Cstruct.BE.get_uint32 payload 12) in
-  let src_mask = Cstruct.get_uint8 payload 16 in
-  let dst = Ipaddr.V4.of_int32 (Cstruct.BE.get_uint32 payload 17) in
-  let dst_mask = Cstruct.get_uint8 payload 21 in
+  (* Skip the UDP header *)
+  let payload = Cstruct.shift payload 8 in
+  let ins_or_app = Cstruct.get_uint8 payload 4 in
+  if ins_or_app <> 0 && ins_or_app <> 1 then
+    Log.err(fun f -> f "Don't know chat to do with the rules")
+  else begin
+    let n = Cstruct.get_uint8 payload 5 in
 
-  let src = Ipaddr.V4.Prefix.make src_mask src in
-  let dst = Ipaddr.V4.Prefix.make dst_mask dst in
+    let rec extract_rule acc payload =
+      let rule_size = 12 in
+      if Cstruct.length payload < rule_size then
+        (* TODO: what is the expected behaviour if there is not already consummed data? *)
+        acc
+      else begin
+        let src = Ipaddr.V4.of_int32 (Cstruct.BE.get_uint32 payload 0) in  
+        let dst = Ipaddr.V4.of_int32 (Cstruct.BE.get_uint32 payload 4) in
 
-  let ins_or_app = Cstruct.get_uint8 payload 22 in
-  let proto = match Cstruct.get_uint8 payload 23 with
-    | 1 -> Some `ICMP
-    | 6 -> Some `TCP
-    | 17 -> Some `UDP
-    | _ -> None (* FIXME: distinguish a value error from a special ANY case? *)
-  in
-  let action = match Cstruct.get_uint8 payload 24 with
-    | 0 -> Some DROP
-    | 1 -> Some ACCEPT
-    | _ -> None
-  in
-  let r = {src ; dst ; proto ; action} in
-  match ins_or_app, r with
-  (* not recognized protocol or action *)
-  | _, r when r.action = None ->
-    Log.err(fun f -> f "Cannot recognize rule: %s" (rule_to_string r))
-  (* other cases: insert *)
-  | 0, r ->
-    Log.info(fun f -> f "Insert rule: %s" (rule_to_string r));
-    t.l <- r::t.l
-  (* other cases: append *)
-  | 1, r ->
-    Log.info(fun f -> f "Append rule: %s" (rule_to_string r));
-    t.l <- List.append t.l [{src ; dst ; proto ; action}]
-  (* the rule is neither to be inserted or appended *)
-  | _, _ ->
-    Log.err(fun f -> f "Don't know chat to do with rule: %s" (rule_to_string r))
+        let src_mask = Cstruct.get_uint8 payload 8 in
+        let src = Ipaddr.V4.Prefix.make src_mask src in
+        let dst_mask = Cstruct.get_uint8 payload 9 in
+        let dst = Ipaddr.V4.Prefix.make dst_mask dst in
+  
+        let proto = match Cstruct.get_uint8 payload 10 with
+          | 1 -> Some `ICMP
+          | 6 -> Some `TCP
+          | 17 -> Some `UDP
+          | _ -> None (* FIXME: distinguish a value error from a special ANY case? *)
+        in
+        let action = match Cstruct.get_uint8 payload 11 with
+          | 0 -> Some DROP
+          | 1 -> Some ACCEPT
+          | _ -> None
+        in
+
+        let r = {src ; dst ; proto ; action} in
+        (* Fail on the first unrecognized rule *)
+        if action = None then begin
+          Log.err(fun f -> f "Cannot recognize rule: %s" (rule_to_string r));
+          []
+        end else begin
+          Log.debug(fun f -> f "Recognized rule: %s" (rule_to_string r));
+          extract_rule (r::acc) (Cstruct.shift payload rule_size)
+        end
+      end
+    in
+
+    let r = extract_rule [] (Cstruct.shift payload 6) in
+
+    match ins_or_app, r with
+    | _, _ when List.length r <> n ->
+      Log.err(fun f -> f "Not enough rules %d vs. %d" (List.length r) n)
+    | 0, r ->
+      t.l <- List.append r t.l
+    | 1, r ->
+      t.l <- List.append t.l r
+    | _, _ ->
+      Log.err(fun f -> f "Don't know chat to do with the rules");
+      assert false; (* The code should not go there...*)
+  end
 
 (* Takes an ipv4 header [ipv4_hdr] and the whole IPv4 [packet] (containing the header).
    We want to filter out any packet matching the [filters] list, and if not filtered,
