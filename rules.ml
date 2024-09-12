@@ -10,20 +10,28 @@ type decision =
 
 type rule = {
   src : Ipaddr.V4.Prefix.t ;
-  dst : Ipaddr.V4.Prefix.t ;
-  proto : Ipv4_packet.protocol option ;
-  (* TODO:
   psrc : int ;
+  dst : Ipaddr.V4.Prefix.t ;
   pdst : int ;
-  *)
+  proto : Ipv4_packet.protocol option ;
   action : decision option ;
 }
 
 let rule_to_string r =
   String.concat " " [
     Ipaddr.V4.Prefix.to_string r.src ;
+    ":" ;
+    begin match r.psrc with
+    | 0 -> "ANY"
+    | x -> Int.to_string x
+    end ;
     "->" ;
     Ipaddr.V4.Prefix.to_string r.dst ;
+    ":" ;
+    begin match r.pdst with
+    | 0 -> "ANY"
+    | x -> Int.to_string x
+    end ;
     "(" ;
     begin match r.proto with
     | Some `TCP -> "TCP"
@@ -73,14 +81,16 @@ let default_drop _cb (dest, _packet) =
      + 4B IP source (all 0s is joker)
      + 4B IP dest (all 0s is joker)
      + 1B source netmask (0 is joker) + 1B destination netmask (0 is joker)
+     + 2B port source (0 is joker)
+     + 2B destination source (0 is joker)
      + 1B the protocol code (ICMP=1, TCP=6, UDP=17, ANY=other values)
      + 1B the decision (0=DROP, 1=ACCEPT, anything else is a failure)
 
    One can send such a packet with:
-     python -c "import sys; sys.stdout.buffer.write(bytearray([49, 50, 51, 52, 0, 2, 10, 11, 12, 13, 192, 168, 0, 0, 24, 24, 6, 0, 172, 16, 0, 0, 0, 0, 0, 0, 0, 0, 255, 1]))" | nc -u 10.0.0.2 1234
+     python -c "import sys; sys.stdout.buffer.write(bytearray([49, 50, 51, 52, 0, 2, 10, 11, 12, 13, 192, 168, 0, 0, 24, 24, 0, 53, 0, 0, 6, 0, 172, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 1]))" | nc -u 10.0.0.2 1234
    This would append the rules:
-     10.11.12.13/24 -> 192.168.0.0/24 ( TCP ) : DROP
-     172.16.0.0/12 -> 0.0.0.0/0 ( ANY ) : ACCEPT
+     10.11.12.13/24 : 53 -> 192.168.0.0/24 : ANY ( TCP ) : DROP
+     172.16.0.0/12 : ANY -> 0.0.0.0/0 : ANY ( ANY ) : ACCEPT
 *)
 let magic_hdr = Int32.of_string "0x31323334"
 
@@ -99,7 +109,7 @@ let update t payload =
     let n = Cstruct.get_uint8 payload 5 in
 
     let rec extract_rule acc payload =
-      let rule_size = 12 in
+      let rule_size = 16 in
       if Cstruct.length payload < rule_size then
         (* TODO: what is the expected behaviour if there is not already consummed data? *)
         acc
@@ -111,20 +121,23 @@ let update t payload =
         let src = Ipaddr.V4.Prefix.make src_mask src in
         let dst_mask = Cstruct.get_uint8 payload 9 in
         let dst = Ipaddr.V4.Prefix.make dst_mask dst in
+
+        let psrc = Cstruct.BE.get_uint16 payload 10 in
+        let pdst = Cstruct.BE.get_uint16 payload 12 in
   
-        let proto = match Cstruct.get_uint8 payload 10 with
+        let proto = match Cstruct.get_uint8 payload 14 with
           | 1 -> Some `ICMP
           | 6 -> Some `TCP
           | 17 -> Some `UDP
           | _ -> None (* FIXME: distinguish a value error from a special ANY case? *)
         in
-        let action = match Cstruct.get_uint8 payload 11 with
+        let action = match Cstruct.get_uint8 payload 15 with
           | 0 -> Some DROP
           | 1 -> Some ACCEPT
           | _ -> None
         in
 
-        let r = {src ; dst ; proto ; action} in
+        let r = {src ; dst ; psrc ; pdst ; proto ; action} in
         (* Fail on the first unrecognized rule *)
         if action = None then begin
           Log.err(fun f -> f "Cannot recognize rule: %s" (rule_to_string r));
@@ -163,15 +176,17 @@ let filter t forward_to (ipv4_hdr, packet) =
     | [] -> default_cb forward_to (ipv4_hdr.dst, packet)
 
     (* If the packet matches the condition and has an accept action *)
-    | {src; dst; proto; action=Some ACCEPT}::_ when
+    | {src; psrc=_; dst; pdst=_; proto; action=Some ACCEPT}::_ when
         match_ip ipv4_hdr.src src && match_ip ipv4_hdr.dst dst &&
         (proto = None || Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto = proto)
+        (* TODO: also check the ports :) *)
       -> forward_to (ipv4_hdr.dst, packet)
 
     (* Otherwise the packet matches and the action is drop *)
-    | {src; dst; proto; action=Some DROP}::_ when
+    | {src; psrc=_; dst; pdst=_; proto; action=Some DROP}::_ when
         match_ip ipv4_hdr.src src && match_ip ipv4_hdr.dst dst &&
         (proto = None || Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto = proto)
+        (* TODO: also check the ports :) *)
       ->
         Log.debug (fun f -> f "Filter out a packet from %a to %a..." Ipaddr.V4.Prefix.pp src Ipaddr.V4.Prefix.pp dst);
         Lwt.return_unit
