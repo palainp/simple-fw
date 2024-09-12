@@ -15,7 +15,7 @@ module Main
   = struct
 
   (* configure logs, so we can use them later *)
-  let log = Logs.Src.create "nat" ~doc:"FW device"
+  let log = Logs.Src.create "fw" ~doc:"FW device"
   module Log = (val Logs.src_log log : Logs.LOG)
 
   (* We'll need to make routing decisions on both the public and private
@@ -26,6 +26,10 @@ module Main
   type decision = 
     | ACCEPT
     | DROP
+    (* TODO:
+     | ESTABLISHED
+     | RELATED will need more work... *)
+
   type rule = {
     src : Ipaddr.V4.t ;
     dst : Ipaddr.V4.t ;
@@ -38,52 +42,67 @@ module Main
     {src=Ipaddr.V4.of_string_exn "10.10.10.10"; dst=Ipaddr.V4.of_string_exn "172.10.10.10"; proto=Some `TCP; action=ACCEPT};
   ]
 
+  (* Here we apply, for easy testing, a default to accept last ressort rule :x *)
+  let last_ressort_rule
+  : (Ipaddr.V4.t * Cstruct.t -> unit Lwt.t) -> (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
+  = fun cb (dest, packet) -> cb (dest, packet)
+
+(*
+  (* The default to drop last ressort rule would be *)
+  let last_ressort_rule
+  : (Ipaddr.V4.t * Cstruct.t -> unit Lwt.t) -> (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
+  = fun _cb (dest, _packet) ->
+      Log.debug (fun f -> f "Filter out a packet to %a..." Ipaddr.V4.pp dest);
+      Lwt.return_unit
+*)
+
   (* the specific impls we're using show up as arguments to start. *)
   let start public_netif private_netif
             public_ethernet private_ethernet
             public_arpv4 private_arpv4
             public_ipv4 private_ipv4 _rng () =
 
-    (* Forward the (eth_hdr, ipv4_hdr, payload) packet to the public interface *)
+    (* Forward the (dest, packet) [packet] to the public interface, using [dest] to understand how to route *)
     let output_public :
-    (Ethernet.Packet.t * Ipv4_packet.t * Cstruct.t) -> unit Lwt.t
-     = fun (_eth_hdr, ipv4_hdr, payload) ->
+    (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
+     = fun (dest, packet) ->
       (* For IPv4 only one prefix can be configured so the list is always of length 1 *)
       let network = List.hd (Public_ipv4.configured_ips public_ipv4) in
 
-      Public_routing.destination_mac network None public_arpv4 ipv4_hdr.dst >>= function
+      Public_routing.destination_mac network None public_arpv4 dest >>= function
       | Error _ ->
         Log.debug (fun f -> f "Could not send a packet from the public interface to the local network,\
                                 as a failure occurred on the ARP layer");
         Lwt.return_unit
       | Ok destination ->
         Public_ethernet.write public_ethernet destination `IPv4 (fun b ->
-          let len = Cstruct.length payload in
-          Cstruct.blit payload 0 b 0 len ;
+          let len = Cstruct.length packet in
+          Cstruct.blit packet 0 b 0 len ;
           len) >>= function
           | Error e ->
             Log.err (fun f -> f "Failed to send packet from public interface: %a"
                           Public_ethernet.pp_error e);
             Lwt.return_unit
-          | Ok () -> Lwt.return_unit
+          | Ok () ->
+            Lwt.return_unit
     in
 
-    (* Forward the (eth_hdr, ipv4_hdr, payload) packet to the private interface *)
+    (* Forward the (dest, packet) [packet] to the private interface, using [dest] to understand how to route *)
     let output_private :
-    (Ethernet.Packet.t * Ipv4_packet.t * Cstruct.t) -> unit Lwt.t
-     = fun (_eth_hdr, ipv4_hdr, payload) ->
+    (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
+     = fun (dest, packet) ->
       (* For IPv4 only one prefix can be configured so the list is always of length 1 *)
       let network = List.hd (Private_ipv4.configured_ips private_ipv4) in
 
-      Private_routing.destination_mac network None private_arpv4 ipv4_hdr.dst >>= function
+      Private_routing.destination_mac network None private_arpv4 dest >>= function
       | Error _ ->
         Log.debug (fun f -> f "Could not send a packet from the private interface to the local network,\
                                 as a failure occurred on the ARP layer");
         Lwt.return_unit
       | Ok destination ->
         Private_ethernet.write private_ethernet destination `IPv4 (fun b ->
-          let len = Cstruct.length payload in
-          Cstruct.blit payload 0 b 0 len ;
+          let len = Cstruct.length packet in
+          Cstruct.blit packet 0 b 0 len ;
           len) >>= function
           | Error e ->
             Log.err (fun f -> f "Failed to send packet from private interface: %a"
@@ -98,51 +117,41 @@ module Main
     let filter filter_rules forward_to packet =
 
       let rec apply_rules_and_forward :
-      (Ethernet.Packet.t * Ipv4_packet.t * Cstruct.t -> unit Lwt.t) -> (Ethernet.Packet.t * Ipv4_packet.t * Cstruct.t) -> rule list -> unit Lwt.t
-       = fun forward_to (eth_hdr, ipv4_hdr, payload) filter_rules  ->
+      (Ipaddr.V4.t * Cstruct.t -> unit Lwt.t) -> (Ipv4_packet.t * Cstruct.t) -> rule list -> unit Lwt.t
+       = fun forward_to (ipv4_hdr, packet) filter_rules  ->
         match filter_rules with
-        (* If the list is empty -> apply default action, here accept *)
-        | [] -> forward_to (eth_hdr, ipv4_hdr, payload)
+        (* If the list is empty -> apply default action *)
+        | [] -> last_ressort_rule forward_to (ipv4_hdr.dst, packet)
         (* If the packet matches the condition and has an accept action *)
         | {src; dst; proto; action=ACCEPT}::_ when
             ipv4_hdr.src = src && ipv4_hdr.dst = dst &&
             Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto = proto
-          -> forward_to (eth_hdr, ipv4_hdr, payload)
+          -> forward_to (ipv4_hdr.dst, packet)
         (* Otherwise the packet matches and the action is drop *)
-        | {src; dst; proto=_; action=DROP}::_ when
-            ipv4_hdr.src = src && ipv4_hdr.dst = dst
+        | {src; dst; proto; action=DROP}::_ when
+            ipv4_hdr.src = src && ipv4_hdr.dst = dst &&
+            Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto = proto
           ->
-            Log.debug (fun f -> f "Filter out a packet...");
+            Log.debug (fun f -> f "Filter out a packet from %a to %a..." Ipaddr.V4.pp src Ipaddr.V4.pp dst);
             Lwt.return_unit
         (* Or finally the packet does not matche the condition *)
-        | _::tail -> apply_rules_and_forward forward_to (eth_hdr, ipv4_hdr, payload) tail
+        | _::tail -> apply_rules_and_forward forward_to (ipv4_hdr, packet) tail
       in
 
-      (* Handle ethernet *)
-      match Ethernet.Packet.of_cstruct packet with
+      (* Handle IPv4 *)
+      match Ipv4_packet.Unmarshal.of_cstruct packet with
       | Result.Error s ->
-          Logs.err (fun m -> m "Can't parse packet: %s" s);
+          Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
           Lwt.return_unit
-      | Result.Ok (eth_hdr, payload) ->
-        match eth_hdr.Ethernet.Packet.ethertype with
-        | `ARP | `IPv6 ->
-          Log.err (fun f -> f "packet is not ipv4");
-          Lwt.return_unit
-        | `IPv4 ->
-          (* Handle IPv4 *)
-          match Ipv4_packet.Unmarshal.of_cstruct payload with
-          | Result.Error s ->
-              Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
-              Lwt.return_unit
-          | Result.Ok (ipv4_hdr, payload) ->
-            apply_rules_and_forward forward_to (eth_hdr, ipv4_hdr, payload) filter_rules
+      | Result.Ok (ipv4_hdr, _payload) ->
+        apply_rules_and_forward forward_to (ipv4_hdr, packet) filter_rules
     in
 
     (* we need to establish listeners for the private and public interfaces *)
     (* we're interested in all traffic to the physical interface; we'd like to
        send ARP traffic to the normal ARP listener and responder,
        handle ipv4 traffic with the functions we've defined above for filtering,
-       and ignore all ipv6 traffic (ipv6 has no need for NAT!). *)
+       and ignore all ipv6 traffic. *)
     let listen_public =
       let header_size = Ethernet.Packet.sizeof_ethernet
       and input = (* Takes an ethernet packet and send it to the relevant callback *)

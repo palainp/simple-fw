@@ -32,7 +32,6 @@ let public_ipv4 = create_ipv4 ~group:"public" public_ethernet public_arpv4
 let private_ipv4 = create_ipv4 ~group:"private" private_ethernet private_arpv4
 
 let packages = [
-  package ~min:"3.0.1" "mirage-nat";
   package "ethernet";
   package ~min:"7.0.0" "tcpip";
   package ~min:"4.0.0" "mirage-runtime";
