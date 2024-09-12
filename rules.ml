@@ -104,7 +104,7 @@ let update t payload =
   let payload = Cstruct.shift payload 8 in
   let ins_or_app = Cstruct.get_uint8 payload 4 in
   if ins_or_app <> 0 && ins_or_app <> 1 then
-    Log.err(fun f -> f "Don't know chat to do with the rules")
+    Log.err(fun f -> f "Don't know what to do with the rules")
   else begin
     let n = Cstruct.get_uint8 payload 5 in
 
