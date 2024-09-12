@@ -49,10 +49,20 @@ module Main
         Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
         Lwt.return_unit
 
+      (* If the packet is a UDP packet to us, decode *)
       | Result.Ok (ipv4_hdr, payload) when
+        Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto =
+ Some `UDP &&
         (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) &&
-        Cstruct.get_uint8 payload 0 = 0xa5 ->
-        Logs.err (fun m -> m "Got an update message from %a" Ipaddr.V4.pp ipv4_hdr.src);
+        Rules.magic_is_present payload ->
+        Logs.info (fun m -> m "Got an update message from %a" Ipaddr.V4.pp ipv4_hdr.src);
+        Rules.update filter_rules payload ;
+        Lwt.return_unit
+
+      (* If the packet is a UDP packet to us, decode *)
+      | Result.Ok (ipv4_hdr, _payload) when
+        (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) ->
+        Logs.info (fun m -> m "Got an message from %a but not an update packet" Ipaddr.V4.pp ipv4_hdr.src);
         Lwt.return_unit
 
       | Result.Ok (ipv4_hdr, _payload) ->
