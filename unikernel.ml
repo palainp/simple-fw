@@ -29,7 +29,35 @@ module Main
             public_arpv4 private_arpv4
             public_ipv4 private_ipv4 _rng () =
 
-    let filter = Rules.init Rules.default_accept in
+    (* Creates a set of rules (empty) and a default condition (accept) *)
+    let filter_rules =
+      let public_network = List.hd (Public_ipv4.configured_ips public_ipv4) in
+      let public_ipv4 = Ipaddr.V4.Prefix.address public_network in
+      let private_network = List.hd (Private_ipv4.configured_ips private_ipv4) in
+      let private_ipv4 = Ipaddr.V4.Prefix.address private_network in
+
+      Rules.init public_ipv4 private_ipv4 Rules.default_accept
+    in
+
+    (* Takes an IPv4 [packet], unmarshal it, check if we're the destination and
+       the payload is some sort of rule update, apply that, and if we're not the
+       destination, use the filter_rules to [forward_to] or not *)
+    let filter out packet =
+      (* Handle IPv4 only... *)
+      match Ipv4_packet.Unmarshal.of_cstruct packet with
+      | Result.Error s ->
+        Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
+        Lwt.return_unit
+
+      | Result.Ok (ipv4_hdr, payload) when
+        (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) &&
+        Cstruct.get_uint8 payload 0 = 0xa5 ->
+        Logs.err (fun m -> m "Got an update message from %a" Ipaddr.V4.pp ipv4_hdr.src);
+        Lwt.return_unit
+
+      | Result.Ok (ipv4_hdr, _payload) ->
+        Rules.filter filter_rules out (ipv4_hdr, packet)
+    in
 
     (* Forward the (dest, packet) [packet] to the public interface, using [dest] to understand how to route *)
     let output_public :
@@ -90,7 +118,7 @@ module Main
       and input = (* Takes an ethernet packet and send it to the relevant callback *)
         Public_ethernet.input
           ~arpv4:(Public_arpv4.input public_arpv4)
-          ~ipv4:(Rules.filter filter output_private)
+          ~ipv4:(filter output_private)
           ~ipv6:(fun _ -> Lwt.return_unit) (* IPv6 is not relevant so far -> DROP *)
           public_ethernet
       in
@@ -106,7 +134,7 @@ module Main
       and input = (* Takes an ethernet packet and send it to the relevant callback *)
         Private_ethernet.input
           ~arpv4:(Private_arpv4.input private_arpv4)
-          ~ipv4:(Rules.filter filter output_public)
+          ~ipv4:(filter output_public)
           ~ipv6:(fun _ -> Lwt.return_unit) (* IPv6 is not relevant so far -> DROP *)
           private_ethernet
       in

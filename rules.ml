@@ -18,12 +18,14 @@ type rule = {
 type cb = Ipaddr.V4.t * Cstruct.t -> unit Lwt.t
 
 type t = {
+  public_ipv4 : Ipaddr.V4.t ;
+  private_ipv4 : Ipaddr.V4.t ;
   mutable l : rule list ;
   last_ressort : cb -> (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
 }
 
-let init default_cb =
-  { l = [] ; last_ressort = default_cb }
+let init public_ipv4 private_ipv4 default_cb =
+  { public_ipv4 ; private_ipv4 ;  l = [] ; last_ressort = default_cb }
 
 (* Here we apply, for easy testing, a default to accept last ressort rule :x *)
 let default_accept cb (dest, packet) =
@@ -34,11 +36,11 @@ let default_drop _cb (dest, _packet) =
   Log.debug (fun f -> f "Filter out a packet to %a..." Ipaddr.V4.pp dest);
   Lwt.return_unit
 
-
-(* Takes an ethernet packet and unmarshal it into an IPv4 packet.
-   We want to filter out any packet matching the [filters] list,
-   and if not filtered, transfer it to [forward_to]. *)
-let filter t forward_to packet =
+(* Takes an ipv4 header [ipv4_hdr] and the whole IPv4 [packet] (containing the header).
+   We want to filter out any packet matching the [filters] list, and if not filtered,
+   transfer it (unchanged) to [forward_to].
+   NOTE: We know the packet is not for us. *)
+let filter t forward_to (ipv4_hdr, packet) =
   let rec apply_rules_and_forward
   : cb -> (cb -> (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t) -> (Ipv4_packet.t * Cstruct.t) -> rule list -> unit Lwt.t
   = fun forward_to default_cb (ipv4_hdr, packet) filter_rules ->
@@ -60,11 +62,4 @@ let filter t forward_to packet =
     (* Or finally the packet does not matche the condition *)
     | _::tail -> apply_rules_and_forward forward_to default_cb (ipv4_hdr, packet) tail
   in
-
-  (* Handle IPv4 *)
-  match Ipv4_packet.Unmarshal.of_cstruct packet with
-  | Result.Error s ->
-      Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
-      Lwt.return_unit
-  | Result.Ok (ipv4_hdr, _payload) ->
-    apply_rules_and_forward forward_to t.last_ressort (ipv4_hdr, packet) t.l
+  apply_rules_and_forward forward_to t.last_ressort (ipv4_hdr, packet) t.l
