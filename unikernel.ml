@@ -41,7 +41,7 @@ module Main
 
     (* Takes an IPv4 [packet], unmarshal it, check if we're the destination and
        the payload is some sort of rule update, apply that, and if we're not the
-       destination, use the filter_rules to [forward_to] or not *)
+       destination, use the filter_rules to [out] the packet or not. *)
     let filter out packet =
       (* Handle IPv4 only... *)
       match Ipv4_packet.Unmarshal.of_cstruct packet with
@@ -59,12 +59,13 @@ module Main
         Rules.update filter_rules payload ;
         Lwt.return_unit
 
-      (* If the packet is a UDP packet to us, decode *)
+      (* If the packet is a UDP packet to us but not an update packet, ignore *)
       | Result.Ok (ipv4_hdr, _payload) when
         (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) ->
-        Logs.info (fun m -> m "Got an message from %a but not an update packet" Ipaddr.V4.pp ipv4_hdr.src);
+        Logs.debug (fun m -> m "Got an message from %a but not an update packet" Ipaddr.V4.pp ipv4_hdr.src);
         Lwt.return_unit
 
+      (* Otherwise try to forward (or not) the packet *)
       | Result.Ok (ipv4_hdr, _payload) ->
         Rules.filter filter_rules out (ipv4_hdr, packet)
     in
