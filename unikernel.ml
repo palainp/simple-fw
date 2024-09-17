@@ -39,6 +39,60 @@ module Main
       Rules.init public_ipv4 private_ipv4 Rules.default_accept
     in
 
+    let output_arp_public :
+    (Cstruct.t * Macaddr.t) -> unit Lwt.t
+    = fun (packet, dest) ->
+      let size = Arp_packet.size in
+      Public_ethernet.write public_ethernet dest `ARP ~size
+        (fun b -> let len = Cstruct.length packet in
+                  Cstruct.blit packet 0 b 0 len ;
+                  len) >>= function
+        | Error e ->
+          Log.err (fun f -> f "error %a while outputting public ARP packet"
+                        Public_ethernet.pp_error e);
+          Lwt.return_unit
+        | Ok () ->
+          Lwt.return_unit
+    in
+
+    let output_arp_private :
+    (Cstruct.t * Macaddr.t) -> unit Lwt.t
+    = fun (packet, dest) ->
+      let size = Arp_packet.size in
+      Private_ethernet.write private_ethernet dest `ARP ~size
+        (fun b -> let len = Cstruct.length packet in
+                  Cstruct.blit packet 0 b 0 len ;
+                  len) >>= function
+        | Error e ->
+          Log.err (fun f -> f "error %a while outputting private ARP packet"
+                        Private_ethernet.pp_error e);
+          Lwt.return_unit
+        | Ok () ->
+          Lwt.return_unit
+    in
+
+    (* Takes an arp packet, and if we are concerned reply to it, otherwise forward it
+    on the other link *)
+    let handle_arp thisout otherout my_mac my_ip packet =
+      match Arp_packet.decode packet with
+      | Result.Error s ->
+        Logs.err (fun m -> m "Can't parse Arp packet: %a" Arp_packet.pp_error s);
+        Lwt.return_unit
+
+      | Ok arp ->
+        match arp.operation, arp.target_ip with
+        | Request, target_ip when Ipaddr.V4.compare target_ip my_ip = 0 ->
+          let reply:Arp_packet.t = {operation=Arp_packet.Reply; source_mac=my_mac; source_ip=my_ip; target_mac=arp.source_mac; target_ip=arp.source_ip;} in
+          thisout (Arp_packet.encode reply, arp.source_mac)
+          (* reply to it *)
+        | Reply, target_ip when Ipaddr.V4.compare target_ip my_ip = 0 ->
+          Lwt.return_unit
+          (* got our reply, deal with it *)
+        | _, _ ->
+          otherout (packet, arp.target_mac)
+          (* any other case forward on the other interface *)
+    in
+
     (* Takes an IPv4 [packet], unmarshal it, check if we're the destination and
        the payload is some sort of rule update, apply that, and if we're not the
        destination, use the filter_rules to [out] the packet or not. *)
@@ -128,7 +182,7 @@ module Main
       let header_size = Ethernet.Packet.sizeof_ethernet
       and input = (* Takes an ethernet packet and send it to the relevant callback *)
         Public_ethernet.input
-          ~arpv4:(Public_arpv4.input public_arpv4)
+          ~arpv4:(handle_arp output_arp_public output_arp_private  (Public_ethernet.mac public_ethernet) filter_rules.public_ipv4)
           ~ipv4:(filter output_private)
           ~ipv6:(fun _ -> Lwt.return_unit) (* IPv6 is not relevant so far -> DROP *)
           public_ethernet
@@ -144,7 +198,7 @@ module Main
       let header_size = Ethernet.Packet.sizeof_ethernet
       and input = (* Takes an ethernet packet and send it to the relevant callback *)
         Private_ethernet.input
-          ~arpv4:(Private_arpv4.input private_arpv4)
+          ~arpv4:(handle_arp output_arp_private output_arp_public (Private_ethernet.mac private_ethernet) filter_rules.private_ipv4)
           ~ipv4:(filter output_public)
           ~ipv6:(fun _ -> Lwt.return_unit) (* IPv6 is not relevant so far -> DROP *)
           private_ethernet
