@@ -8,9 +8,6 @@ module Main
        a module argument. *)
     (Public_net: Mirage_net.S) (Private_net: Mirage_net.S)
     (Public_ethernet : Ethernet.S) (Private_ethernet : Ethernet.S)
-    (Public_arpv4 : Arp.S) (Private_arpv4 : Arp.S)
-    (Public_ipv4 : Tcpip.Ip.S with type ipaddr = Ipaddr.V4.t and type prefix = Ipaddr.V4.Prefix.t)
-    (Private_ipv4 : Tcpip.Ip.S with type ipaddr = Ipaddr.V4.t and type prefix = Ipaddr.V4.Prefix.t)
     (Random : Mirage_random.S) (Clock : Mirage_clock.MCLOCK)
   = struct
 
@@ -18,25 +15,14 @@ module Main
   let log = Logs.Src.create "fw" ~doc:"FW device"
   module Log = (val Logs.src_log log : Logs.LOG)
 
-  (* We'll need to make routing decisions on both the public and private
-     interfaces. *)
-  module Public_routing = Routing.Make(Log)(Public_arpv4)
-  module Private_routing = Routing.Make(Log)(Private_arpv4)
-
   (* the specific impls we're using show up as arguments to start. *)
   let start public_netif private_netif
             _public_ethernet _private_ethernet
-            _public_arpv4 _private_arpv4
-            _public_ipv4 _private_ipv4 _rng () =
+            _rng () =
 
     (* Creates a set of rules (empty) and a default condition (accept) *)
     let filter_rules =
-      let public_network = List.hd (Public_ipv4.configured_ips _public_ipv4) in
-      let public_ipv4 = Ipaddr.V4.Prefix.address public_network in
-      let private_network = List.hd (Private_ipv4.configured_ips _private_ipv4) in
-      let private_ipv4 = Ipaddr.V4.Prefix.address private_network in
-
-      Rules.init public_ipv4 private_ipv4 Rules.default_accept
+      Rules.init true
     in
 
     (* let output_arp_public :
@@ -92,42 +78,40 @@ module Main
           otherout (packet, arp.source_mac, arp.target_mac)
           (* any other case forward on the other interface *)
     in *)
-    let handle_arp thisout my_ip packet =
+    (* let handle_arp thisout my_ip packet =
       thisout(my_ip, packet)
-    in
+    in *)
 
     (* Takes an IPv4 [packet], unmarshal it, check if we're the destination and
        the payload is some sort of rule update, apply that, and if we're not the
        destination, use the filter_rules to [out] the packet or not. *)
-    (* let filter _out _frame _packet =
+    let is_forwardable packet =
       (* Handle IPv4 only... *)
-      Log.err(fun f -> f "filter run 1");Lwt.return_unit
-      (* match Ipv4_packet.Unmarshal.of_cstruct packet with
+      match Ipv4_packet.Unmarshal.of_cstruct packet with
       | Result.Error s ->
         Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
-        Lwt.return_unit
+        false
 
       (* If the packet is a UDP packet to us, decode *)
-      | Result.Ok (ipv4_hdr, payload) when
+      (* | Result.Ok (ipv4_hdr, payload) when
         Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto =
  Some `UDP &&
         (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) &&
         Rules.magic_is_present payload ->
         Logs.info (fun m -> m "Got an update message from %a" Ipaddr.V4.pp ipv4_hdr.src);
         Rules.update filter_rules payload ;
-        Lwt.return_unit
+        false
 
       (* If the packet is a UDP packet to us but not an update packet, ignore *)
       | Result.Ok (ipv4_hdr, _payload) when
         (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) ->
         Logs.debug (fun m -> m "Got an message from %a but not an update packet" Ipaddr.V4.pp ipv4_hdr.src);
-        Lwt.return_unit
+        false *)
 
       (* Otherwise try to forward (or not) the packet *)
-      | Result.Ok (ipv4_hdr, _payload) ->
-        Log.err(fun f -> f "filter run 2");
-        Rules.filter filter_rules out (ipv4_hdr, frame) *)
-    in *)
+      | Result.Ok (ipv4_hdr, payload) ->
+        Rules.filter filter_rules (ipv4_hdr, payload)
+    in
 
     (* Forward the (dest, packet) [packet] to the public interface, using [dest] to understand how to route *)
     (* let output_public :
@@ -156,26 +140,9 @@ module Main
 
     (* Forward the (dest, packet) [packet] to the private interface, using [dest] to understand how to route *)
     let output_private :
-    (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
-     = fun (_dest, packet) ->
+    Cstruct.t -> unit Lwt.t
+     = fun packet ->
       (* For IPv4 only one prefix can be configured so the list is always of length 1 *)
-      (* let network = List.hd (Private_ipv4.configured_ips private_ipv4) in
-
-      Private_routing.destination_mac network None private_arpv4 dest >>= function
-      | Error _ ->
-        Log.debug (fun f -> f "Could not send a packet from the private interface to the local network,\
-                                as a failure occurred on the ARP layer");
-        Lwt.return_unit
-      | Ok destination ->
-        Private_ethernet.write private_ethernet destination `IPv4 (fun b ->
-          let len = Cstruct.length packet in
-          Cstruct.blit packet 0 b 0 len ;
-          len) >>= function
-          | Error e ->
-            Log.err (fun f -> f "Failed to send packet from private interface: %a"
-                          Private_ethernet.pp_error e);
-            Lwt.return_unit
-          | Ok () -> Lwt.return_unit *)
         let len = Cstruct.length packet in
         Private_net.write private_netif ~size:len (fun b -> Cstruct.blit packet 0 b 0 len ; len) >|= function
         | Ok () -> ()
@@ -192,14 +159,25 @@ module Main
     let listen_public =
       let header_size = Ethernet.Packet.sizeof_ethernet
       and input frame= (* Takes an ethernet packet and send it to the relevant callback *)
-        Log.err(fun f -> f "helloworld output_private");
-        Public_ethernet.input
-          (* ~arpv4:(handle_arp output_arp_public output_arp_private  (Public_ethernet.mac public_ethernet) filter_rules.public_ipv4) *)
+        (* Public_ethernet.input *)
+          (* ~arpv4:(handle_arp output_arp_public output_arp_private  (Public_ethernet.mac public_ethernet) filter_rules.public_ipv4)
           ~arpv4:(fun _ -> handle_arp output_private filter_rules.public_ipv4 frame)
           (* ~ipv4:(filter output_private frame) *)
           ~ipv4:(fun _ -> handle_arp output_private filter_rules.public_ipv4 frame)
           ~ipv6:(fun _ -> Lwt.return_unit) (* IPv6 is not relevant so far -> DROP *)
-          _public_ethernet frame
+          _public_ethernet frame *)
+          match Ethernet.Packet.of_cstruct frame with
+          | Ok (header, payload) ->
+            begin
+              match header.Ethernet.Packet.ethertype with
+              | `ARP -> output_private frame
+              | `IPv4 when is_forwardable payload -> output_private frame
+              | _ -> Lwt.return_unit
+            end
+          | Error s ->
+            Log.debug (fun f -> f "dropping Ethernet frame: %s" s);
+            Lwt.return_unit
+
         (* let len = Cstruct.length frame in
         Private_net.write private_netif ~size:len (fun b -> Cstruct.blit frame 0 b 0 len ; len) >|= function
         | Ok () -> ()
@@ -223,7 +201,6 @@ module Main
           ~ipv4:(filter output_public)
           ~ipv6:(fun _ -> Lwt.return_unit) (* IPv6 is not relevant so far -> DROP *)
           private_ethernet *)
-        Log.err(fun f -> f "helloworld output_public");
         let len = Cstruct.length frame in
         Public_net.write public_netif ~size:len (fun b -> Cstruct.blit frame 0 b 0 len ; len) >|= function
         | Ok () -> ()

@@ -54,16 +54,14 @@ let match_ip ip target =
 type cb = Ipaddr.V4.t * Cstruct.t -> unit Lwt.t
 
 type t = {
-  public_ipv4 : Ipaddr.V4.t ;
-  private_ipv4 : Ipaddr.V4.t ;
   mutable l : rule list ;
-  last_ressort : cb -> (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t
+  default : bool;
 }
 
-let init public_ipv4 private_ipv4 last_ressort =
-  { public_ipv4 ; private_ipv4 ; l = [] ; last_ressort }
+let init default =
+  { l = [] ; default }
 
-(* Here we apply, for easy testing, a default to accept last ressort rule :x *)
+(* Here we apply, for easy testing, a default to accept last ressort rule :x
 let default_accept cb (dest, packet) =
   Log.debug (fun f -> f "Default rule accept packet to %a..." Ipaddr.V4.pp dest);
   cb (dest, packet)
@@ -71,7 +69,7 @@ let default_accept cb (dest, packet) =
 (* The default to drop last ressort rule would be *)
 let default_drop _cb (dest, _packet) =
   Log.debug (fun f -> f "Default rule drop packet to %a..." Ipaddr.V4.pp dest);
-  Lwt.return_unit
+  Lwt.return_unit *)
 
 (* The update packet is (as a UDP packet):
    2B port source + 2B port dest + 2B len + 2B crc
@@ -167,32 +165,33 @@ let update t payload =
    We want to filter out any packet matching the [filters] list, and if not filtered,
    transfer it (unchanged) to [forward_to].
    NOTE: We know the packet is not for us. *)
-let filter t forward_to (ipv4_hdr, packet) =
-  let rec apply_rules_and_forward
-  : cb -> (cb -> (Ipaddr.V4.t * Cstruct.t) -> unit Lwt.t) -> (Ipv4_packet.t * Cstruct.t) -> rule list -> unit Lwt.t
-  = fun forward_to default_cb (ipv4_hdr, packet) filter_rules ->
+let filter t (ipv4_hdr, packet) =
+  let rec apply_rules
+  : bool -> (Ipv4_packet.t * Cstruct.t) -> rule list -> bool
+  = fun default (ipv4_hdr, packet) filter_rules ->
     match filter_rules with
     (* If the list is empty -> apply default action *)
-    | [] -> default_cb forward_to (ipv4_hdr.dst, packet)
+    | [] -> default
+    (* default_cb forward_to (ipv4_hdr.dst, packet) *)
 
     (* If the packet matches the condition and has an accept action *)
     | {src; psrc=_; dst; pdst=_; proto; action=Some ACCEPT}::_ when
         match_ip ipv4_hdr.src src && match_ip ipv4_hdr.dst dst &&
         (proto = None || Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto = proto)
         (* TODO: also check the ports :) *)
-      -> forward_to (ipv4_hdr.dst, packet)
+      -> true
 
     (* Otherwise the packet matches and the action is drop *)
     | {src; psrc=_; dst; pdst=_; proto; action=Some DROP}::_ when
         match_ip ipv4_hdr.src src && match_ip ipv4_hdr.dst dst &&
         (proto = None || Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto = proto)
         (* TODO: also check the ports :) *)
-      ->
+      -> 
         Log.debug (fun f -> f "Filter out a packet from %a to %a..." Ipaddr.V4.Prefix.pp src Ipaddr.V4.Prefix.pp dst);
-        Lwt.return_unit
+        false
 
     (* Or finally the packet does not match the condition *)
-    | _::tail -> apply_rules_and_forward forward_to default_cb (ipv4_hdr, packet) tail
+    | _::tail -> apply_rules default (ipv4_hdr, packet) tail
   in
 
-  apply_rules_and_forward forward_to t.last_ressort (ipv4_hdr, packet) t.l
+  apply_rules t.default (ipv4_hdr, packet) t.l

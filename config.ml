@@ -43,8 +43,6 @@ let packages = [
 let main = main "Unikernel.Main" ~packages
            (network  @-> network  @->
             ethernet @-> ethernet @->
-            arpv4    @-> arpv4    @->
-            ipv4     @-> ipv4     @->
             random   @-> mclock   @-> job)
 
 (* we need to pass each of the network-related impls we've made to the
@@ -52,7 +50,5 @@ let main = main "Unikernel.Main" ~packages
 let () = register "simple-fw" [ main
                                  $ public_netif    $ private_netif
                                  $ public_ethernet $ private_ethernet
-                                 $ public_arpv4    $ private_arpv4
-                                 $ public_ipv4     $ private_ipv4
                                  $ default_random  $ default_monotonic_clock
                                ]
