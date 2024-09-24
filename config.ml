@@ -20,16 +20,16 @@ let public_ethernet = ethif public_netif
 let private_ethernet = ethif private_netif
 
 (* use the functional address resolution protocol *)
-let public_arpv4 = arp public_ethernet
-let private_arpv4 = arp private_ethernet
+(* let public_arpv4 = arp public_ethernet *)
+(* let private_arpv4 = arp private_ethernet *)
 
 (* finally, use statically configured (at build or runtime) ipv4 addresses.
    (you might want to use dhcp to configure the address on the public interface.
      this is possible, but the code is a bit too convoluted for a good example.
      for now, we'll use statically configured addresses on both interfaces. *)
 
-let public_ipv4 = create_ipv4 ~group:"public" public_ethernet public_arpv4
-let private_ipv4 = create_ipv4 ~group:"private" private_ethernet private_arpv4
+(* let public_ipv4 = create_ipv4 ~group:"public" public_ethernet public_arpv4 *)
+(* let private_ipv4 = create_ipv4 ~group:"private" private_ethernet private_arpv4 *)
 
 let packages = [
   package "ethernet";
