@@ -3,12 +3,12 @@
 open Lwt.Infix
 
 module Main
-    (* our unikernel is functorized over the physical, ethernet, ARP, and IPv4
-       modules for the public and private interfaces, so each one shows up as
-       a module argument. *)
+    (* our unikernel is functorized over the physical, and ethernet modules
+       for the public and private interfaces, so each one shows up as a module
+       argument. *)
     (Public_net: Mirage_net.S) (Private_net: Mirage_net.S)
     (Public_ethernet : Ethernet.S) (Private_ethernet : Ethernet.S)
-    (Random : Mirage_random.S) (Clock : Mirage_clock.MCLOCK)
+    (Random : Mirage_crypto_rng_mirage.S) (Clock : Mirage_clock.MCLOCK)
   = struct
 
   (* configure logs, so we can use them later *)
