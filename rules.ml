@@ -165,7 +165,7 @@ let update t payload =
   let compare_port packet proto r_psrc r_pdst =
     match proto with
     | 6 -> (
-      match Tcp_packet.Unmarshal.of_cstruct packet with
+      match Tcp.Tcp_packet.Unmarshal.of_cstruct packet with
       | Result.Error s ->
           Logs.err (fun m -> m "Can't parse TCP packet: %s" s);
           false
