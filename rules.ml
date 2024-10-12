@@ -85,7 +85,7 @@ let init default =
         {
           src = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
           psrc = 0;
-          dst = Ipaddr.V4.Prefix.of_string_exn "224.0.0.251/32";
+          dst = Ipaddr.V4.Prefix.global;
           pdst = 0;
           proto = Some `UDP;
           action = Some ACCEPT;
