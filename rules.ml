@@ -50,54 +50,42 @@ let init default =
   {
     l =
       [
+        (* Accept TCP 7070 <-> ANY *)
         {
-          src = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          src = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           psrc = 0;
-          dst = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          dst = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           pdst = 7070;
           proto = Some `TCP;
           action = Some ACCEPT;
         };
         {
-          src = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          src = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           psrc = 7070;
-          dst = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          dst = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           pdst = 0;
           proto = Some `TCP;
           action = Some ACCEPT;
         };
+        (* Accept ICMP *)
         {
-          src = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          src = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           psrc = 0;
-          dst = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
-          pdst = 8080;
-          proto = Some `UDP;
-          action = Some ACCEPT;
-        };
-        {
-          src = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
-          psrc = 0;
-          dst = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          dst = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           pdst = 0;
           proto = Some `ICMP;
           action = Some ACCEPT;
         };
+        (* Accept UDP ANY <-> ANY *)
         {
-          src = Ipaddr.V4.Prefix.of_string_exn "10.0.0.0/24";
+          src = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           psrc = 0;
           dst = Ipaddr.V4.Prefix.global;
           pdst = 0;
           proto = Some `UDP;
           action = Some ACCEPT;
         };
-        {
-          src = Ipaddr.V4.Prefix.global;
-          psrc = 0;
-          dst = Ipaddr.V4.Prefix.global;
-          pdst = 0;
-          proto = None;
-          action = Some DROP;
-        };
+        (* Last ressort decision is passed as [default] parameter *)
       ];
     default;
   }

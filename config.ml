@@ -1,4 +1,4 @@
-(* mirage >= 4.7.0 & < 4.8.0 *)
+(* mirage >= 4.7.0 & < 4.9.0 *)
 open Mirage
 
 (* we need two network interfaces: a public side and a private side *)
