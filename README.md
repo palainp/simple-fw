@@ -91,3 +91,79 @@ Connecting to host 10.10.0.100, port 7070
 
 iperf Done.
 ```
+
+## Get it Cstruct-free
+
+This unikernel is simple enough to try to make it Cstruct free and check if/wether there is better performances.
+First thing is to find where `Cstruct.t` lives:
+```bash
+$ grep -R Cstruct duniverse/ | cut -d/ -f 2 | sort -u
+arp
+eqaf
+ethernet
+mirage
+mirage-crypto
+mirage-flow
+mirage-net
+mirage-net-solo5
+mirage-solo5
+mirage-tcpip
+ocaml-cstruct
+ocaml-ipaddr
+randomconv
+```
+
+Some of the dependencies (eqaf, mirage, mirage-crypto, mirage-solo5, ocaml-ipaddr, randomconv) have references to Cstruct only in test files, documentation, or Cstruct-related part of the library (and block for mirage, eio for mirage-crypto but we don't use them in this unikernel):
+```bash
+$ grep -Ri Cstruct duniverse/eqaf/ | cut -d: -f1 | sort -u
+duniverse/eqaf/CHANGES.md
+duniverse/eqaf/.cirrus.yml
+duniverse/eqaf/eqaf-cstruct.opam
+duniverse/eqaf/lib/dune
+duniverse/eqaf/lib/eqaf_cstruct.ml
+duniverse/eqaf/lib/eqaf_cstruct.mli
+duniverse/eqaf/README.md
+$ grep -Ri Cstruct duniverse/mirage/ | cut -d: -f1 | sort -u
+duniverse/mirage/CHANGES.md
+duniverse/mirage/lib/devices/block.ml
+$ grep -Ri Cstruct duniverse/mirage-crypto/ | cut -d: -f1 | sort -u
+duniverse/mirage-crypto/CHANGES.md
+duniverse/mirage-crypto/rng/eio/mirage_crypto_rng_eio.ml
+duniverse/mirage-crypto/rng/eio/mirage_crypto_rng_eio.mli
+duniverse/mirage-crypto/tests/test_rng.ml
+$ grep -Ri Cstruct duniverse/mirage-solo5/ | cut -d: -f1 | sort -u
+duniverse/mirage-solo5/CHANGES.md
+duniverse/mirage-solo5/lib/dune
+duniverse/mirage-solo5/mirage-solo5.opam
+$ grep -Ri Cstruct duniverse/ocaml-ipaddr/ | cut -d: -f1 | sort -u
+duniverse/ocaml-ipaddr/CHANGES.md
+duniverse/ocaml-ipaddr/ipaddr-cstruct.opam
+duniverse/ocaml-ipaddr/ipaddr-sexp.opam
+duniverse/ocaml-ipaddr/lib/dune
+duniverse/ocaml-ipaddr/lib/ipaddr_cstruct.ml
+duniverse/ocaml-ipaddr/lib/ipaddr_cstruct.mli
+duniverse/ocaml-ipaddr/lib/macaddr_cstruct.ml
+duniverse/ocaml-ipaddr/lib/macaddr_cstruct.mli
+duniverse/ocaml-ipaddr/lib_test/dune
+duniverse/ocaml-ipaddr/lib_test/test_ipaddr.ml
+duniverse/ocaml-ipaddr/lib_test/test_macaddr.ml
+duniverse/ocaml-ipaddr/macaddr-cstruct.opam
+duniverse/ocaml-ipaddr/macaddr-sexp.opam
+duniverse/ocaml-ipaddr/README.md
+$ grep -Ri Cstruct duniverse/randomconv | cut -d: -f1 | sort -u
+duniverse/randomconv/CHANGES.md
+```
+
+For the others we need to pin specific branches and update the opam environment, get the new dependencies and rebuild the unikernel:
+```bash
+$ opam pin https://github.com/palainp/arp.git#remove-cstruct -n
+$ opam pin https://github.com/palainp/ethernet.git#remove-cstruct -n
+$ opam pin https://github.com/palainp/mirage-flow.git#remove-cstruct -n
+$ opam pin https://github.com/palainp/mirage-net.git#remove-cstruct -n
+$ opam pin https://github.com/palainp/mirage-net-solo5.git#remove-cstruct -n
+$ opam pin https://github.com/palainp/mirage-tcpip.git#remove-cstruct -n
+$ opam update
+$ mirage configure -t hvt && make depend && dune build
+```
+
+Currently the work in mirage-tcip is still in progress....

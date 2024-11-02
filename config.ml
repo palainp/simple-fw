@@ -24,6 +24,7 @@ let packages = [
   package "ipaddr";
   package ~min:"8.2.0" ~sublibs:["ipv4";"tcp"] "tcpip"; (* There was a breaking API changes in the 8.2 series *)
   package "logs";
+  package "ohex";
   (* package ~min:"4.0.0" "mirage-runtime"; *) (* We want to avoid runtime argument at any cost *)
 ]
 

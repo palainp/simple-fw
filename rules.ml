@@ -122,39 +122,39 @@ let init default =
 let magic_hdr = Int32.of_string "0x31323334"
 
 let magic_is_present payload =
-  Cstruct.BE.get_uint16 payload 2 = 1234
+  String.get_uint16_be payload 2 = 1234
   && (* our port must be 1234 *)
-  Cstruct.BE.get_uint32 payload 8 = magic_hdr
+  String.get_uint32_be payload 8 = magic_hdr
 (* I currently don't bother to check the crc... *)
 
 let update t payload =
   (* Skip the UDP header *)
-  let payload = Cstruct.shift payload 8 in
-  let ins_or_app = Cstruct.get_uint8 payload 4 in
+  let offset = 8 in
+  let ins_or_app = String.get_uint8 payload (offset+4) in
   if ins_or_app <> 0 && ins_or_app <> 1 then
     Log.err (fun f -> f "Don't know what to do with the rules")
   else
-    let n = Cstruct.get_uint8 payload 5 in
+    let n = String.get_uint8 payload (offset+5) in
 
-    let rec extract_rule acc payload =
+    let rec extract_rule off acc payload =
       let rule_size = 16 in
-      if Cstruct.length payload < rule_size then
+      if off + String.length payload < rule_size then
         (* TODO: what is the expected behaviour if there is not already consummed data? *)
         acc
       else
-        let src = Ipaddr.V4.of_int32 (Cstruct.BE.get_uint32 payload 0) in
-        let dst = Ipaddr.V4.of_int32 (Cstruct.BE.get_uint32 payload 4) in
+        let src = Ipaddr.V4.of_int32 (String.get_uint32_be payload (off+0)) in
+        let dst = Ipaddr.V4.of_int32 (String.get_uint32_be payload (off+4)) in
 
-        let src_mask = Cstruct.get_uint8 payload 8 in
+        let src_mask = String.get_uint8 payload (off+8) in
         let src = Ipaddr.V4.Prefix.make src_mask src in
-        let dst_mask = Cstruct.get_uint8 payload 9 in
+        let dst_mask = String.get_uint8 payload (off+9) in
         let dst = Ipaddr.V4.Prefix.make dst_mask dst in
 
-        let psrc = Cstruct.BE.get_uint16 payload 10 in
-        let pdst = Cstruct.BE.get_uint16 payload 12 in
+        let psrc = String.get_uint16_be payload (off+10) in
+        let pdst = String.get_uint16_be payload (off+12) in
 
         let proto =
-          match Cstruct.get_uint8 payload 14 with
+          match String.get_uint8 payload (off+14) with
           | 1 -> Some `ICMP
           | 6 -> Some `TCP
           | 17 -> Some `UDP
@@ -162,7 +162,7 @@ let update t payload =
           (* FIXME: distinguish a value error from a special ANY case? *)
         in
         let action =
-          match Cstruct.get_uint8 payload 15 with
+          match String.get_uint8 payload (off+15) with
           | 0 -> Some DROP
           | 1 -> Some ACCEPT
           | _ -> None
@@ -175,10 +175,11 @@ let update t payload =
           [])
         else (
           Log.debug (fun f -> f "Recognized rule: %s" (rule_to_string r));
-          extract_rule (r :: acc) (Cstruct.shift payload rule_size))
+          extract_rule (off+rule_size) (r :: acc) payload
+        )
     in
 
-    let r = extract_rule [] (Cstruct.shift payload 6) in
+    let r = extract_rule (offset+6) [] payload in
 
     match (ins_or_app, r) with
     | _, _ when List.length r <> n ->
