@@ -15,15 +15,16 @@ $ sudo ip addr add 10.10.0.200/24 dev output
 $ sudo ip link set dev output up
 
 # we don't need ip_forward as our unikernel will do it :)
-$ sysctl -w net.ipv4.ip_forward=0
+$ sudo sysctl -w net.ipv4.ip_forward=0
 # but we need to allow local ARP resolution
-$ sysctl -w net.ipv4.conf.all.arp_announce=1
-$ sysctl -w net.ipv4.conf.all.arp_ignore=2
-$ sysctl -w net.ipv4.conf.all.rp_filter=0
-$ sysctl -w net.ipv4.conf.all.arp_filter=0
-$ sysctl -w net.ipv4.conf.all.accept_local=1
+$ sudo sysctl -w net.ipv4.conf.all.arp_announce=1
+$ sudo sysctl -w net.ipv4.conf.all.arp_ignore=1
+$ sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+$ sudo sysctl -w net.ipv4.conf.all.arp_filter=0
+$ sudo sysctl -w net.ipv4.conf.all.accept_local=1
 ```
 
+A simple script (created for my fedora Qube, please adapt to your needs :) ) do that: `sudo sh setup_network.sh`. With Qubes you'll also need to change the input policy to accept during the tests :)
 
 ## Compile and run
 After cloning this repository, you can run the following to build the unikernel:
@@ -66,28 +67,61 @@ $ nc -l -s 10.10.0.100 -p 1234      # anything else is dropped
 ...
 ```
 
-And you can even run `ipef3`:
+And you can even run `ipef3` (with 3 different terminals, one for `solo5-hvt`, one for `iperf3 -s ...`, and the last one for `iperf3 -c`):
 ```bash
 $ iperf3 -s -p 7070 --bind-dev input
 ...
 $ iperf3 -c 10.10.0.100 --bind-dev output -p 7070
 Connecting to host 10.10.0.100, port 7070
-[  5] local 10.10.0.200 port 60650 connected to 10.10.0.100 port 7070
+[  5] local 10.10.0.200 port 36992 connected to 10.10.0.100 port 7070
 [ ID] Interval           Transfer     Bitrate         Retr  Cwnd
-[  5]   0.00-1.00   sec  42.1 MBytes   353 Mbits/sec   25   1.06 MBytes       
-[  5]   1.00-2.00   sec  42.5 MBytes   357 Mbits/sec    0   1.18 MBytes       
-[  5]   2.00-3.00   sec  40.0 MBytes   336 Mbits/sec    0   1.28 MBytes       
-[  5]   3.00-4.00   sec  40.0 MBytes   336 Mbits/sec    0   1.35 MBytes       
-[  5]   4.00-5.00   sec  37.5 MBytes   315 Mbits/sec    2   1.01 MBytes       
-[  5]   5.00-6.00   sec  37.5 MBytes   315 Mbits/sec    0   1.07 MBytes       
-[  5]   6.00-7.00   sec  43.8 MBytes   367 Mbits/sec    0   1.11 MBytes       
-[  5]   7.00-8.00   sec  43.8 MBytes   367 Mbits/sec    0   1.14 MBytes       
-[  5]   8.00-9.00   sec  43.8 MBytes   367 Mbits/sec    0   1.15 MBytes       
-[  5]   9.00-10.00  sec  41.2 MBytes   346 Mbits/sec    0   1.16 MBytes       
+[  5]   0.00-1.00   sec   150 MBytes  1.25 Gbits/sec   45   1.15 MBytes
+[  5]   1.00-2.00   sec  72.4 MBytes   607 Mbits/sec    0   1.26 MBytes
+[  5]   2.00-3.00   sec  72.6 MBytes   609 Mbits/sec    0   1.34 MBytes
+[  5]   3.00-4.00   sec  71.5 MBytes   600 Mbits/sec    4   1.00 MBytes
+[  5]   4.00-5.00   sec  77.5 MBytes   650 Mbits/sec    0   1.07 MBytes
+[  5]   5.00-6.00   sec  73.1 MBytes   613 Mbits/sec    0   1.11 MBytes
+[  5]   6.00-7.00   sec  77.6 MBytes   651 Mbits/sec    0   1.14 MBytes
+[  5]   7.00-8.00   sec  72.6 MBytes   609 Mbits/sec    0   1.19 MBytes
+[  5]   8.00-9.00   sec  73.9 MBytes   620 Mbits/sec    0   1.24 MBytes
+[  5]   9.00-10.00  sec  77.2 MBytes   648 Mbits/sec    0   1.28 MBytes
 - - - - - - - - - - - - - - - - - - - - - - - - -
 [ ID] Interval           Transfer     Bitrate         Retr
-[  5]   0.00-10.00  sec   412 MBytes   346 Mbits/sec   27             sender
-[  5]   0.00-10.01  sec   410 MBytes   344 Mbits/sec                  receiver
+[  5]   0.00-10.00  sec   820 MBytes   688 Mbits/sec   49             sender
+[  5]   0.00-10.02  sec   818 MBytes   685 Mbits/sec                  receiver
 
 iperf Done.
 ```
+
+## Get it Bigarray-free
+
+Bigarrays are not managed by the Ocaml runtime, here we want to try to have Cstruct.t backed by bytes instead of bigarrays. In order to do that the most convenient way is to pin a specific branch for `ocaml-cstruct`, adapt `mirage-net-solo5` to that new low-layer of Cstruct, and do not modify any other existing code, refetch dependencies, and recompile:
+```bash
+$ opam pin https://github.com/palainp/mirage-net-solo5.git#no-bigarray -n
+$ opam pin https://github.com/hannesm/ocaml-cstruct.git#no-bigarray -y
+...
+$ mirage clean && rm -rf duniverse/ && mirage configure -t hvt && make depend && dune build
+...
+```
+
+## Performance measurement
+
+Now we can show the performance results (the receiver line in the client `iperfd3` output, which correspond to the server's output, anyway, both are similar) in following table (tested with spt target inside a single Qube, please note that this can reduce the overall performances compared to a barmetal distribution), using iperf3 (with TCP as default), running for 30s (option `-t 30`), restarted between each run, 32MB memory for the unikernel, other configuration are welcome :). Ocaml 5 is provided by https://github.com/mirage/ocaml-solo5/pull/134.
+
+| Av. bandwitdh (Gbits/sec) |     Ocaml 4.14.1   |     Ocaml 5.2   |   C relay   |
+|---------------------------|--------------------|-----------------|-------------|
+| Cstruct as BA             |      1.16          |      1.12       |   1.58      |
+| Cstruct as bytes          |      1.42          |      1.41       |   1.58      |
+
+| Tot. transfer (GB/30s) |     Ocaml 4.14.1   |     Ocaml 5.2   |   C relay   |
+|------------------------|--------------------|-----------------|-------------|
+| Cstruct as BA          |       4.07         |      3.90       |   5.53      |
+| Cstruct as bytes       |       4.95         |      4.92       |   5.53      |
+
+The "C relay" baseline is using the provided `relay.c` to mimic the behavior of the unikernel without any packet inspection, it just forwards everything from one interface to the other:
+```bash
+$ gcc -Wall -Wextra -std=gnu11 -pedantic relay.c -o relay
+$ ./relay input output
+...
+```
+This binary gets `1.58 Gbits/sec` and `5.53 GB/30s` as presented in the previous table.
