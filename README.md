@@ -106,17 +106,14 @@ $ mirage clean && rm -rf duniverse/ && mirage configure -t hvt && make depend &&
 
 ## Performance measurement
 
-Now we can show the performance results (the receiver line in the client `iperfd3` output, which correspond to the server's output, anyway, both are similar) in following table (tested with spt target inside a single Qube, please note that this can reduce the overall performances compared to a barmetal distribution), using iperf3 (with TCP as default), running for 30s (option `-t 30`), restarted between each run, 32MB memory for the unikernel, other configuration are welcome :). Ocaml 5 is provided by https://github.com/mirage/ocaml-solo5/pull/134.
+### all in a single machine
+
+Now we can show the performance results (the receiver line in the client `iperf3` output, which correspond to the server's output, anyway, both are similar) in following table (tested with spt target inside a single Qube, please note that this can reduce the overall performances compared to a barmetal distribution), using iperf3 (with TCP as default), running for 30s (option `-t 30`), restarted between each run, 32MB memory for the unikernel, other configuration are welcome :). Ocaml 5 is provided by https://github.com/mirage/ocaml-solo5/pull/134.
 
 | Av. bandwitdh (Gbits/sec) |     Ocaml 4.14.1   |     Ocaml 5.2   |   C relay   |
 |---------------------------|--------------------|-----------------|-------------|
 | Cstruct as BA             |      1.16          |      1.12       |   1.58      |
-| Cstruct as bytes          |      1.42          |      1.41       |   1.58      |
-
-| Tot. transfer (GB/30s) |     Ocaml 4.14.1   |     Ocaml 5.2   |   C relay   |
-|------------------------|--------------------|-----------------|-------------|
-| Cstruct as BA          |       4.07         |      3.90       |   5.53      |
-| Cstruct as bytes       |       4.95         |      4.92       |   5.53      |
+| Cstruct as bytes          |      1.42          |      1.41       |     /       |
 
 The "C relay" baseline is using the provided `relay.c` to mimic the behavior of the unikernel without any packet inspection, it just forwards everything from one interface to the other:
 ```bash
@@ -124,4 +121,25 @@ $ gcc -Wall -Wextra -std=gnu11 -pedantic relay.c -o relay
 $ ./relay input output
 ...
 ```
-This binary gets `1.58 Gbits/sec` and `5.53 GB/30s` as presented in the previous table.
+This binary gets `1.58 Gbits/sec` as presented in the previous table.
+
+### using 3 virtual machines
+
+I also tried with 3 differents virtual machines (one for the iperf server, one for the iperf client, and one in the middle that forward everything received on one interface to the other).
+- Ocaml results are with this unikernel using virtio target and two virtio interfaces, and 32MB of RAM.
+- The same as described before for the C relay column. The `input` and `output` tap interfaces are bridged to the interfaces of the intermediate virtual machine (i.e. traffic goes through `ens3 -> input -> unikernel -> output -> ens4` with `ens3 -> input` a linux bridge, resp. `output -> ens4`).
+- The Linux brctl column was obtained by directly connecting both interface of the intermediate virtual machine using:
+```bash
+brctl addbr br0
+brctl addif br0 input
+brctl addif br0 output
+ip link set dev br0 up
+```
+Therefore that last column is a bit unfair (compared to `relay`) as the traffic does not go down to user space, and there is no additional bridges.
+
+All results have been obtained with a iperf run with `-t 30`. I think the internal network in the cyberrange I used is limited to around 1Gbit/sec, not sure what is the bottlneck.
+
+| Av. bandwitdh (Gbits/sec) |  Ocaml 4.14.2  |  Ocaml 5.2.1  |   C relay   |  Linux brctl  |
+|---------------------------|----------------|---------------|-------------|---------------|
+| Cstruct as BA             |     0.653      |    0.627      |    0.655    |     1.05      |
+| Cstruct as bytes          |     0.714      |    0.698      |      /      |       /       |
