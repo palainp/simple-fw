@@ -1,0 +1,5 @@
+(executable
+  (name relay)
+  (modules relay)
+  (foreign_stubs (language c) (names tuntap_stubs))
+  (libraries unix))
