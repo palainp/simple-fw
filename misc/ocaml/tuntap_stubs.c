@@ -20,7 +20,7 @@ CAMLprim value tuntap_create_tap_interface(value v_name) {
     int fd, err;
 
     if ((fd = open("/dev/net/tun", O_RDWR)) < 0) {
-        caml_uerror("open", Nothing);
+        uerror("open", Nothing);
     }
 
     memset(&ifr, 0, sizeof(ifr));
@@ -30,7 +30,7 @@ CAMLprim value tuntap_create_tap_interface(value v_name) {
 
     if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0) {
         close(fd);
-        caml_uerror("ioctl(TUNSETIFF)", Nothing);
+        uerror("ioctl(TUNSETIFF)", Nothing);
     }
     res = caml_alloc_tuple(2);
     v_dev = caml_copy_string(ifr.ifr_name);
