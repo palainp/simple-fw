@@ -127,7 +127,7 @@ This binary gets `1.58 Gbits/sec` as presented in the previous table.
 
 I also tried with 3 differents virtual machines (one for the iperf server, one for the iperf client, and one in the middle that forward everything received on one interface to the other).
 - Ocaml results are with this unikernel using virtio target and two virtio interfaces, and 32MB of RAM.
-- The same as described before for the C relay column. The `input` and `output` tap interfaces are bridged to the interfaces of the intermediate virtual machine (i.e. traffic goes through `ens3 -> input -> unikernel -> output -> ens4` with `ens3 -> input` a linux bridge, resp. `output -> ens4`).
+- Ocaml bis results and C relay results are the same as described before for the C relay column. The `input` and `output` tap interfaces are bridged to the interfaces of the intermediate virtual machine (i.e. traffic goes through `ens3 -> input -> unikernel -> output -> ens4` with `ens3 -> input` a linux bridge, resp. `output -> ens4`).
 - The Linux brctl column was obtained by directly connecting both interface of the intermediate virtual machine using:
 ```bash
 brctl addbr br0
@@ -137,9 +137,11 @@ ip link set dev br0 up
 ```
 Therefore that last column is a bit unfair (compared to `relay`) as the traffic does not go down to user space, and there is no additional bridges.
 
-All results have been obtained with a iperf run with `-t 30`. I think the internal network in the cyberrange I used is limited to around 1Gbit/sec, not sure what is the bottlneck.
+All results have been obtained with a single iperf run with `-t 30`.
 
-| Av. bandwitdh (Gbits/sec) |  Ocaml 4.14.2  |  Ocaml 5.2.1  |   C relay   |  Linux brctl  |
-|---------------------------|----------------|---------------|-------------|---------------|
-| Cstruct as BA             |     0.653      |    0.627      |    0.655    |     1.05      |
-| Cstruct as bytes          |     0.714      |    0.698      |      /      |       /       |
+| Av. bandwitdh (Gbits/sec) |  Ocaml 4.14.2  |  Ocaml 5.2.1  |  Ocaml bis 4.14.1  |  Ocaml bis 5.2  |   C relay   |  Linux brctl  |
+|---------------------------|----------------|---------------|--------------------|-----------------|-------------|---------------|
+| Cstruct as BA             |     0.653      |    0.627      |       0.519        |      0.512      |    0.655    |     1.05      |
+| Cstruct as bytes          |     0.714      |    0.698      |       0.517        |      0.519      |      /      |       /       |
+
+So far I'm very confused with these numbers, I think the internal network in the cyberrange I used is limited to around 1Gbit/sec, not sure what is the bottlneck.
