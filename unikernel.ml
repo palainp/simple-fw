@@ -8,7 +8,6 @@ module Main
        argument. *)
     (Public_net: Mirage_net.S) (Private_net: Mirage_net.S)
     (Public_ethernet : Ethernet.S) (Private_ethernet : Ethernet.S)
-    (Random : Mirage_crypto_rng_mirage.S) (Clock : Mirage_clock.MCLOCK)
   = struct
 
   (* configure logs, so we can use them later *)
@@ -17,8 +16,7 @@ module Main
 
   (* the specific impls we're using show up as arguments to start. *)
   let start public_netif private_netif
-            _public_ethernet _private_ethernet
-            _rng () =
+            _public_ethernet _private_ethernet =
 
     (* Creates a set of rules (empty) and a default condition (accept) *)
     let filter_rules =
