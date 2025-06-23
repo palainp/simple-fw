@@ -1,4 +1,4 @@
-(* mirage >= 4.7.0 & < 4.9.0 *)
+(* mirage >= 4.9.0 & < 4.10.0 *)
 open Mirage
 
 (* we need two network interfaces: a public side and a private side *)
@@ -32,13 +32,11 @@ let packages = [
    interfaces in our case, we have to pass them separately. *)
 let main = main "Unikernel.Main" ~packages
            (network  @-> network  @->
-            ethernet @-> ethernet @->
-            random   @-> mclock   @-> job)
+            ethernet @-> ethernet @-> job)
 
 (* we need to pass each of the network-related impls we've made to the
    unikernel, so that it can start the appropriate listeners. *)
 let () = register "simple-fw" [ main
                                  $ public_netif    $ private_netif
                                  $ public_ethernet $ private_ethernet
-                                 $ default_random  $ default_monotonic_clock
                                ]
