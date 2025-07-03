@@ -12,7 +12,7 @@ type rule = {
   psrc : int;
   dst : Ipaddr.V4.Prefix.t;
   pdst : int;
-  proto : Ipv4_packet.protocol option;
+  proto : [ `TCP | `UDP | `ICMP | `ANY ];
   action : decision option;
 }
 
@@ -28,10 +28,10 @@ let rule_to_string r =
       (match r.pdst with 0 -> "ANY" | x -> Int.to_string x);
       "(";
       (match r.proto with
-      | Some `TCP -> "TCP"
-      | Some `UDP -> "UDP"
-      | Some `ICMP -> "ICMP"
-      | None -> "ANY");
+      | `TCP -> "TCP"
+      | `UDP -> "UDP"
+      | `ICMP -> "ICMP"
+      | `ANY -> "ANY");
       ") :";
       (match r.action with
       | Some ACCEPT -> "ACCEPT"
@@ -43,7 +43,7 @@ let rule_to_string r =
 let match_ip ip target =
   target = Ipaddr.V4.Prefix.global || Ipaddr.V4.Prefix.mem ip target
 
-type cb = Ipaddr.V4.t * Cstruct.t -> unit Lwt.t
+type cb = Ipaddr.V4.t * Cstruct.t -> unit
 type t = { mutable l : rule list; default : bool }
 
 let init default =
@@ -56,7 +56,7 @@ let init default =
           psrc = 0;
           dst = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           pdst = 7070;
-          proto = Some `TCP;
+          proto = `TCP;
           action = Some ACCEPT;
         };
         {
@@ -64,7 +64,7 @@ let init default =
           psrc = 7070;
           dst = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           pdst = 0;
-          proto = Some `TCP;
+          proto = `TCP;
           action = Some ACCEPT;
         };
         (* Accept ICMP *)
@@ -73,7 +73,7 @@ let init default =
           psrc = 0;
           dst = Ipaddr.V4.Prefix.of_string_exn "10.10.0.0/24";
           pdst = 0;
-          proto = Some `ICMP;
+          proto = `ICMP;
           action = Some ACCEPT;
         };
         (* Accept UDP ANY <-> ANY *)
@@ -82,7 +82,7 @@ let init default =
           psrc = 0;
           dst = Ipaddr.V4.Prefix.global;
           pdst = 0;
-          proto = Some `UDP;
+          proto = `UDP;
           action = Some ACCEPT;
         };
         (* Last ressort decision is passed as [default] parameter *)
@@ -155,10 +155,10 @@ let update t payload =
 
         let proto =
           match Cstruct.get_uint8 payload 14 with
-          | 1 -> Some `ICMP
-          | 6 -> Some `TCP
-          | 17 -> Some `UDP
-          | _ -> None
+          | 1 -> `ICMP
+          | 6 -> `TCP
+          | 17 -> `UDP
+          | _ -> `ANY
           (* FIXME: distinguish a value error from a special ANY case? *)
         in
         let action =
@@ -192,33 +192,30 @@ let update t payload =
 let is_matching_port packet proto r_psrc r_pdst =
   match (r_psrc, r_pdst, proto) with
   | 0, 0, _ -> true
-  | _, _, 6 -> (
+  | _, _, (6 | 17) -> (
       (* TCP *)
-      match Tcp.Tcp_packet.Unmarshal.of_cstruct packet with
-      | Result.Error s ->
-          Logs.err (fun m -> m "Can't parse TCP packet: %s" s);
-          false
-      | Result.Ok (tcp_hdr, _payload) ->
-          (r_psrc = 0 || tcp_hdr.src_port = r_psrc)
-          && (r_pdst = 0 || tcp_hdr.dst_port = r_pdst))
-  | _, _, 17 -> (
-      (* UDP *)
-      match Udp_packet.Unmarshal.of_cstruct packet with
-      | Result.Error s ->
-          Logs.err (fun m -> m "Can't parse UDP packet: %s" s);
-          false
-      | Result.Ok (udp_hdr, _payload) ->
-          (r_psrc = 0 || udp_hdr.src_port = r_psrc)
-          && (r_pdst = 0 || udp_hdr.dst_port = r_pdst))
+      let src_port = Slice_bstr.get_uint16_be packet 0 in
+      let dst_port = Slice_bstr.get_uint16_be packet 2 in
+      (r_psrc = 0 || src_port = r_psrc)
+      && (r_pdst = 0 || dst_port = r_pdst))
   | _, _, 1 -> true (* ICMP *)
   | _ -> true
+
+let same_protocol expected protocol =
+  match protocol, expected with
+  | 6, `TCP -> true
+  | 17, `UDP -> true
+  | 1, `ICMP -> true
+  | _, `ANY -> true
+  | _ -> false
 
 (* Takes an ipv4 header [ipv4_hdr] and the whole IPv4 [packet] (containing the header).
    We want to filter out any packet matching the [filters] list, and if not filtered,
    transfer it (unchanged) to [forward_to].
    NOTE: We know the packet is not for us. *)
 let filter t (ipv4_hdr, packet) =
-  let rec apply_rules : bool -> Ipv4_packet.t * Cstruct.t -> rule list -> bool =
+  let open Miou_solo5_net in
+  let rec apply_rules : bool -> 'a IPv4.Packet.packet * Slice_bstr.t -> rule list -> bool =
    fun default (ipv4_hdr, packet) filter_rules ->
     match filter_rules with
     (* If the list is empty -> apply default (true or false) action *)
@@ -226,11 +223,9 @@ let filter t (ipv4_hdr, packet) =
     (* If the packet matches the condition and has an accept action *)
     | { src; psrc; dst; pdst; proto; action = Some ACCEPT } :: _
       when match_ip ipv4_hdr.src src && match_ip ipv4_hdr.dst dst
-           && (proto = None
-              || Ipv4_packet.Unmarshal.int_to_protocol
-                   ipv4_hdr.Ipv4_packet.proto
-                 = proto)
-           && is_matching_port packet ipv4_hdr.Ipv4_packet.proto psrc pdst
+           && (proto = `ANY
+              || same_protocol proto ipv4_hdr.IPv4.Packet.protocol)
+           && is_matching_port packet ipv4_hdr.IPv4.Packet.protocol psrc pdst
            (* TODO: also check the ports :) *) ->
         Log.debug (fun f ->
             f "Accept a packet from %a to %a..." Ipaddr.V4.pp ipv4_hdr.src
@@ -239,11 +234,9 @@ let filter t (ipv4_hdr, packet) =
     (* Otherwise the packet matches and the action is drop *)
     | { src; psrc; dst; pdst; proto; action = Some DROP } :: _
       when match_ip ipv4_hdr.src src && match_ip ipv4_hdr.dst dst
-           && (proto = None
-              || Ipv4_packet.Unmarshal.int_to_protocol
-                   ipv4_hdr.Ipv4_packet.proto
-                 = proto)
-           && is_matching_port packet ipv4_hdr.Ipv4_packet.proto psrc pdst
+           && (proto = `ANY
+              || same_protocol proto ipv4_hdr.IPv4.Packet.protocol)
+           && is_matching_port packet ipv4_hdr.IPv4.Packet.protocol psrc pdst
            (* TODO: also check the ports :) *) ->
         Log.debug (fun f ->
             f "Filter out a packet from %a to %a..." Ipaddr.V4.pp ipv4_hdr.src
