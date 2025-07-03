@@ -1,143 +1,83 @@
-(* This unikernel is largely inspired by the example at https://github.com/mirage/mirage-nat/ *)
+let t0 = Miou_solo5.clock_monotonic ()
 
-open Lwt.Infix
-
-module Main
-    (* our unikernel is functorized over the physical, and ethernet modules
-       for the public and private interfaces, so each one shows up as a module
-       argument. *)
-    (Public_net: Mirage_net.S) (Private_net: Mirage_net.S)
-    (Public_ethernet : Ethernet.S) (Private_ethernet : Ethernet.S)
-  = struct
-
-  (* configure logs, so we can use them later *)
-  let log = Logs.Src.create "fw" ~doc:"FW device"
-  module Log = (val Logs.src_log log : Logs.LOG)
-
-  (* the specific impls we're using show up as arguments to start. *)
-  let start public_netif private_netif
-            _public_ethernet _private_ethernet =
-
-    (* Creates a set of rules (empty) and a default condition (accept) *)
-    let filter_rules =
-      Rules.init false
+let reporter ppf =
+  let report src level ~over k msgf =
+    let k _ = over (); k () in
+    let pp header _tags k ppf fmt =
+      let t1 = Miou_solo5.clock_monotonic () in
+      let delta = Float.of_int (t1 - t0) in
+      let delta = delta /. 1_000_000_000. in
+      Fmt.kpf k ppf
+        ("[+%a][%a]%a[%a]: " ^^ fmt ^^ "\n%!")
+        Fmt.(styled `Blue (fmt "%04.04f"))
+        delta
+        Fmt.(styled `Cyan int)
+        (Stdlib.Domain.self () :> int)
+        Logs_fmt.pp_header (level, header)
+        Fmt.(styled `Magenta string)
+        (Logs.Src.name src)
     in
+    msgf @@ fun ?header ?tags fmt -> pp header tags k ppf fmt
+  in
+  { Logs.report }
 
-    (* Takes an IPv4 [packet], unmarshal it, check if we're the destination and
-       the payload is some sort of rule update, apply that, and if we're not the
-       destination, use the filter_rules to [out] the packet or not. *)
-    let is_forwardable packet =
-      (* Handle IPv4 only... *)
-      match Ipv4_packet.Unmarshal.of_cstruct packet with
-      | Result.Error s ->
-        Logs.err (fun m -> m "Can't parse IPv4 packet: %s" s);
-        false
+(* - ARPv4 from [ic] go to [oc]
+   - IPv4 from [ic] which validates [is_forwarded] go to [oc]
+ *)
+let listen ~is_forwardable (ic, cfg) oc =
+  let open Miou_solo5_net in
+  let bstr = Bstr.create (14 + cfg.Miou_solo5.Net.mtu) in
+  let rec go () =
+    let len = Miou_solo5.Net.read_bigstring ic bstr in
+    let pkt = Miou_solo5_net.Ethernet.Packet.decode bstr ~len in
+    let res = Result.map (fun (pkt, payload) -> pkt.Ethernet.Packet.protocol, payload) pkt in
+    begin match res with
+    | Ok (Some Ethernet.ARPv4, _) -> Miou_solo5.Net.write_bigstring oc ~off:0 ~len bstr
+    | Ok (Some Ethernet.IPv4, payload) when is_forwardable payload ->
+      Miou_solo5.Net.write_bigstring oc ~off:0 ~len bstr
+    | _ -> () end;
+    go () in
+  Miou.async go
 
-      (* If the packet is a UDP packet to us, decode *)
-      (* | Result.Ok (ipv4_hdr, payload) when
-        Ipv4_packet.Unmarshal.int_to_protocol ipv4_hdr.Ipv4_packet.proto =
- Some `UDP &&
-        (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) &&
-        Rules.magic_is_present payload ->
-        Logs.info (fun m -> m "Got an update message from %a" Ipaddr.V4.pp ipv4_hdr.src);
-        Rules.update filter_rules payload ;
-        false
+let run _ =
+  Miou_solo5.(run [ net "public"; net "private" ]) @@ fun (public, cfg0) (priv, cfg1) () ->
+  let rules = Rules.init true in
+  let is_forwardable sbstr =
+    let open Miou_solo5_net in
+    match IPv4.Packet.decode sbstr with
+    | Ok (pkt, sbstr) -> Rules.filter rules (pkt, sbstr)
+    | Error _ -> false in
+  let prm0 = listen ~is_forwardable (public, cfg0) priv in (* public -> private *)
+  let prm1 = listen ~is_forwardable (priv, cfg1) public in (* private -> public *)
+  Miou.await_all [ prm0; prm1 ]
+  |> List.iter (function Ok () -> () | Error exn -> raise exn)
 
-      (* If the packet is a UDP packet to us but not an update packet, ignore *)
-      | Result.Ok (ipv4_hdr, _payload) when
-        (ipv4_hdr.dst = filter_rules.public_ipv4 || ipv4_hdr.dst = filter_rules.private_ipv4) ->
-        Logs.debug (fun m -> m "Got an message from %a but not an update packet" Ipaddr.V4.pp ipv4_hdr.src);
-        false *)
+open Cmdliner
 
-      (* Otherwise try to forward (or not) the packet *)
-      | Result.Ok (ipv4_hdr, payload) ->
-        Rules.filter filter_rules (ipv4_hdr, payload)
-    in
+let output_options = "OUTPUT OPTIONS"
+let verbosity = Logs_cli.level ~docs:output_options ()
+let renderer = Fmt_cli.style_renderer ~docs:output_options ()
 
-    (* Forward the (dest, packet) [packet] to the public interface, using [dest] to understand how to route *)
-    let output_public :
-    Cstruct.t -> unit Lwt.t
-     = fun packet ->
-      let len = Cstruct.length packet in
-        Public_net.write public_netif ~size:len (fun b -> Cstruct.blit packet 0 b 0 len ; len) >|= function
-        | Ok () -> ()
-        | Error e ->
-          Log.warn (fun f -> f "netif write errored %a" Public_net.pp_error e) ;
-          ()
-    in
+let utf_8 =
+  let doc = "Allow binaries to emit UTF-8 characters." in
+  Arg.(value & opt bool true & info [ "with-utf-8" ] ~doc)
 
-    (* Forward the (dest, packet) [packet] to the private interface, using [dest] to understand how to route *)
-    let output_private :
-    Cstruct.t -> unit Lwt.t
-     = fun packet ->
-      (* For IPv4 only one prefix can be configured so the list is always of length 1 *)
-        let len = Cstruct.length packet in
-        Private_net.write private_netif ~size:len (fun b -> Cstruct.blit packet 0 b 0 len ; len) >|= function
-        | Ok () -> ()
-        | Error e ->
-          Log.warn (fun f -> f "netif write errored %a" Private_net.pp_error e) ;
-          ()
-    in
+let setup_logs utf_8 style_renderer level =
+  Option.iter (Fmt.set_style_renderer Fmt.stdout) style_renderer;
+  Fmt.set_utf_8 Fmt.stdout utf_8;
+  Logs.set_level level;
+  Logs.set_reporter (reporter Fmt.stdout);
+  Option.is_none level
 
-    (* we need to establish listeners for the private and public interfaces *)
-    (* we're interested in all traffic to the physical interface; we'd like to
-       send ARP traffic to the normal ARP listener and responder,
-       handle ipv4 traffic with the functions we've defined above for filtering,
-       and ignore all ipv6 traffic. *)
-    let listen_public =
-      let header_size = Ethernet.Packet.sizeof_ethernet
-      and input frame= (* Takes an ethernet packet and send it to the relevant callback *)
-          match Ethernet.Packet.of_cstruct frame with
-          | Ok (header, payload) ->
-            begin
-              match header.Ethernet.Packet.ethertype with
-              | `ARP -> output_private frame
-              | `IPv4 when is_forwardable payload -> output_private frame
-              | _ -> Lwt.return_unit
-            end
-          | Error s ->
-            Log.debug (fun f -> f "dropping Ethernet frame: %s" s);
-            Lwt.return_unit
-      in
-      Public_net.listen ~header_size public_netif input >>= function
-      | Error e -> Log.debug (fun f -> f "public interface stopped: %a"
-                                 Public_net.pp_error e); Lwt.return_unit
-      | Ok () -> Log.debug (fun f -> f "public interface terminated normally");
-        Lwt.return_unit
-    in
+let setup_logs =
+  Term.(const setup_logs $ utf_8 $ renderer $ verbosity)
 
-    let listen_private =
-      let header_size = Ethernet.Packet.sizeof_ethernet
-      and input frame = (* Takes an ethernet packet and send it to the relevant callback *)
-          match Ethernet.Packet.of_cstruct frame with
-          | Ok (header, payload) ->
-            begin
-              match header.Ethernet.Packet.ethertype with
-              | `ARP -> output_public frame
-              | `IPv4 when is_forwardable payload -> output_public frame
-              | _ -> Lwt.return_unit
-            end
-          | Error s ->
-            Log.debug (fun f -> f "dropping Ethernet frame: %s" s);
-            Lwt.return_unit
-      in
-      Private_net.listen ~header_size private_netif input >>= function
-      | Error e -> Log.debug (fun f -> f "private interface stopped: %a"
-                                 Private_net.pp_error e); Lwt.return_unit
-      | Ok () -> Log.debug (fun f -> f "private interface terminated normally");
-        Lwt.return_unit
-    in
+let term =
+  let open Term in
+  const run $ setup_logs
 
-    (* Notice how we haven't said anything about ICMP anywhere.  The unikernel
-       doesn't know anything about it, so pinging this host on either interface
-       will just be ignored -- the only way this unikernel can be easily seen,
-       without sending traffic through it, is via ARP.  The `arping` command
-       line utility might be useful in trying to see whether your unikernel is
-       up.  *)
+let cmd =
+  let info = Cmd.info "simple-fw" in
+  Cmd.v info term
 
-    (* start both listeners, and continue as long as both are working. *)
-    Lwt.pick [
-      listen_public;
-      listen_private;
-    ]
-end
+let () = Cmd.(exit @@ eval cmd)
